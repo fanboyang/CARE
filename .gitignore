@@ -3,6 +3,7 @@ __pycache__/
 .DS_Store
 
 # Large or regenerated artifacts.
+data_sources/
 data/benchmarks/
 score_exports/*
 results/*
