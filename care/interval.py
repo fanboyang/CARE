@@ -1,9 +1,10 @@
-"""CARE interval evaluation with one CUDA FAISS retrieval path."""
+"""CARE interval evaluation with explicit CUDA, CPU, and MPS KNN backends."""
 
 from __future__ import annotations
 
 import json
 import math
+import os
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -17,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCORE_MODELS = ("ukge", "passleaf", "beurre")
 DATASETS = ("cn15k", "ppi5k", "nl27k")
 SUBSETS = ("positive", "negative", "combined")
+KNN_BACKENDS = ("cuda", "cpu", "mps")
 SPLIT_FILES = {
     "cal_pos": "calibration_val.csv",
     "cal_neg": "calibration_neg.csv",
@@ -34,6 +36,7 @@ class CareConfig:
     kappa: float = 50.0
     ref_fraction: float = 0.60
     split_seed: int = 0
+    knn_backend: str = "cuda"
 
 
 def load_config(path: str | Path | None = None, target_coverage: float | None = None) -> CareConfig:
@@ -53,6 +56,7 @@ def load_config(path: str | Path | None = None, target_coverage: float | None = 
         kappa=float(params.get("kappa", params.get("shrink", 50.0))),
         ref_fraction=float(split.get("ref_fraction", split.get("reference_pool_fraction", 0.60))),
         split_seed=int(split.get("split_seed", 0)),
+        knn_backend=_normalize_knn_backend(cfg.get("knn_backend", params.get("knn_backend", "cuda"))),
     )
 
 
@@ -177,16 +181,88 @@ def feature_matrix(frame: pd.DataFrame, dataset: str) -> np.ndarray:
     return np.column_stack([scalars, rel_onehot]).astype(np.float32)
 
 
+def _normalize_knn_backend(name: str) -> str:
+    aliases = {
+        "faiss_gpu": "cuda",
+        "faiss-gpu": "cuda",
+        "gpu": "cuda",
+        "faiss_cpu": "cpu",
+        "faiss-cpu": "cpu",
+        "numpy": "cpu",
+        "torch_mps": "mps",
+        "apple_mps": "mps",
+    }
+    backend = aliases.get(str(name).lower(), str(name).lower())
+    if backend not in KNN_BACKENDS:
+        raise ValueError(f"unsupported KNN backend: {name}; choose one of {KNN_BACKENDS}")
+    return backend
+
+
+def _check_knn_inputs(reference: np.ndarray, target: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray, int]:
+    reference = np.ascontiguousarray(reference, dtype=np.float32)
+    target = np.ascontiguousarray(target, dtype=np.float32)
+    k = int(k)
+    if reference.ndim != 2 or target.ndim != 2:
+        raise ValueError("reference and target must be 2-D arrays")
+    if reference.shape[1] != target.shape[1]:
+        raise ValueError(f"KNN feature dimension mismatch: {reference.shape[1]} vs {target.shape[1]}")
+    if k < 1 or k > len(reference):
+        raise ValueError(f"KNN k must be in [1, {len(reference)}], got {k}")
+    return reference, target, k
+
+
 def _cuda_knn(reference: np.ndarray, target: np.ndarray, k: int) -> np.ndarray:
     import faiss
 
-    reference = np.ascontiguousarray(reference, dtype=np.float32)
-    target = np.ascontiguousarray(target, dtype=np.float32)
+    reference, target, k = _check_knn_inputs(reference, target, k)
     gpu = faiss.StandardGpuResources()
     index = faiss.GpuIndexFlatL2(gpu, reference.shape[1])
     index.add(reference)
-    _, idx = index.search(target, int(k))
+    _, idx = index.search(target, k)
     return idx.astype(np.int64, copy=False)
+
+
+def _cpu_knn(reference: np.ndarray, target: np.ndarray, k: int) -> np.ndarray:
+    reference, target, k = _check_knn_inputs(reference, target, k)
+    batch_size = int(os.environ.get("CARE_KNN_BATCH_SIZE", "1024"))
+    ref_norm = np.sum(reference * reference, axis=1, keepdims=False)[None, :]
+    batches = []
+    for start in range(0, len(target), batch_size):
+        query = target[start : start + batch_size]
+        dist = np.sum(query * query, axis=1, keepdims=True) + ref_norm - 2.0 * (query @ reference.T)
+        candidate = np.argpartition(dist, kth=k - 1, axis=1)[:, :k]
+        candidate_dist = np.take_along_axis(dist, candidate, axis=1)
+        order = np.argsort(candidate_dist, axis=1, kind="stable")
+        batches.append(np.take_along_axis(candidate, order, axis=1).astype(np.int64, copy=False))
+    return np.vstack(batches)
+
+
+def _mps_knn(reference: np.ndarray, target: np.ndarray, k: int) -> np.ndarray:
+    reference, target, k = _check_knn_inputs(reference, target, k)
+    import torch
+
+    if not torch.backends.mps.is_available():
+        raise RuntimeError("KNN backend 'mps' was requested, but PyTorch MPS is not available.")
+    batch_size = int(os.environ.get("CARE_KNN_BATCH_SIZE", "1024"))
+    device = torch.device("mps")
+    ref = torch.as_tensor(reference, dtype=torch.float32, device=device)
+    ref_norm = torch.sum(ref * ref, dim=1).unsqueeze(0)
+    batches = []
+    for start in range(0, len(target), batch_size):
+        query = torch.as_tensor(target[start : start + batch_size], dtype=torch.float32, device=device)
+        dist = torch.sum(query * query, dim=1, keepdim=True) + ref_norm - 2.0 * (query @ ref.T)
+        idx = torch.topk(dist, k=k, largest=False, sorted=True).indices
+        batches.append(idx.cpu().numpy().astype(np.int64, copy=False))
+    return np.vstack(batches)
+
+
+def _knn(reference: np.ndarray, target: np.ndarray, k: int, backend: str) -> np.ndarray:
+    backend = _normalize_knn_backend(backend)
+    if backend == "cuda":
+        return _cuda_knn(reference, target, k)
+    if backend == "cpu":
+        return _cpu_knn(reference, target, k)
+    return _mps_knn(reference, target, k)
 
 
 def _split_calibration(cal: pd.DataFrame, cfg: CareConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -214,7 +290,7 @@ def _scales(ref: pd.DataFrame, target: pd.DataFrame, dataset: str, cfg: CareConf
     scaler = StandardScaler()
     ref_x = scaler.fit_transform(feature_matrix(ref, dataset)).astype(np.float32)
     target_x = scaler.transform(feature_matrix(target, dataset)).astype(np.float32)
-    idx = _cuda_knn(ref_x, target_x, cfg.k)
+    idx = _knn(ref_x, target_x, cfg.k, cfg.knn_backend)
     residual = _residual(ref, side)
     local = np.quantile(residual[idx], cfg.rho, axis=1)
     global_scale = float(np.quantile(residual, cfg.rho))

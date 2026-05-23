@@ -1,6 +1,7 @@
 {
   "method": "CARE",
   "target_coverage": 0.9,
+  "knn_backend": "cuda",
   "care": {
     "k": 200,
     "rho": 0.9,

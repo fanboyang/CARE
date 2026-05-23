@@ -8,7 +8,7 @@ context-anchored asymmetric conformal interval.
 ## Layout
 
 ```text
-release/
+care_release/
 ├── README.md
 ├── requirements.txt
 ├── run_cn15k.py
@@ -30,16 +30,17 @@ release/
 
 ## Installation
 
-The released implementation uses one CUDA FAISS nearest-neighbor path.
-
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-The environment must provide CUDA FAISS with `StandardGpuResources` and
-`GpuIndexFlatL2`. CPU FAISS is not supported in this release.
+CARE supports three explicit nearest-neighbor backends:
+
+- `cuda`: FAISS GPU exact L2 search. Install CUDA FAISS separately.
+- `cpu`: batched NumPy exact L2 search. This path needs no FAISS package.
+- `mps`: PyTorch MPS exact L2 search for Apple Silicon. Install PyTorch separately.
 
 ## Required Inputs
 
@@ -59,12 +60,14 @@ python scripts/run_10seed.py
 ```
 
 By default this runs all three datasets, all three score models, and seeds
-`0,1,2,3,4,5,6,7,8,9`.
+`0,1,2,3,4,5,6,7,8,9`. The default KNN backend is `cuda`; use
+`--knn-backend cpu` or `--knn-backend mps` on machines without CUDA FAISS.
 
 Useful narrower runs:
 
 ```bash
 python scripts/run_10seed.py --datasets cn15k --score-models ukge
+python scripts/run_10seed.py --datasets ppi5k --score-models ukge --knn-backend cpu
 python run_cn15k.py --score-models ukge
 python run_ppi5k.py
 python run_nl27k.py
@@ -88,7 +91,7 @@ K = 200
 rho = 0.90
 kappa = 50
 reference/conformal split = 60/40
-retrieval = CUDA FAISS exact L2
+retrieval = exact L2 with cuda/cpu/mps backend
 ```
 
 ## Double-Blind Notes

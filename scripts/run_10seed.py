@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from care.interval import DATASETS, SCORE_MODELS, SUBSETS, evaluate_cell, load_config, write_json  # noqa: E402
+from care.interval import DATASETS, KNN_BACKENDS, SCORE_MODELS, SUBSETS, evaluate_cell, load_config, write_json  # noqa: E402
 
 
 def _csv_list(text: str, choices: tuple[str, ...]) -> tuple[str, ...]:
@@ -36,6 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--score-root", default="score_exports")
     parser.add_argument("--config-dir", default="configs/care_default")
     parser.add_argument("--output-dir", default="results/care_10seed")
+    parser.add_argument("--knn-backend", choices=KNN_BACKENDS, default=None)
     return parser.parse_args()
 
 
@@ -70,16 +71,19 @@ def main() -> None:
     score_models = _csv_list(args.score_models, SCORE_MODELS)
     seeds = _seed_list(args.seeds)
     cfg = load_config(args.config_dir, args.target_coverage)
+    knn_backend = args.knn_backend or cfg.knn_backend
     records = []
     for score_model in score_models:
         for dataset in datasets:
             for seed in seeds:
-                result = evaluate_cell(args.score_root, score_model, dataset, seed, replace(cfg, split_seed=int(seed)))
+                run_cfg = replace(cfg, split_seed=int(seed), knn_backend=knn_backend)
+                result = evaluate_cell(args.score_root, score_model, dataset, seed, run_cfg)
                 out = Path(args.output_dir) / "per_seed" / score_model / dataset / f"seed{seed}.json"
                 write_json(out, result)
                 records.append(result)
                 print(f"finished score_model={score_model} dataset={dataset} seed={seed}")
-    summary = {"method": "CARE", "config": cfg.__dict__, "summary": _summarize(records)}
+    summary_config = {**cfg.__dict__, "knn_backend": knn_backend, "split_seed": "seed_specific"}
+    summary = {"method": "CARE", "config": summary_config, "summary": _summarize(records)}
     path = write_json(Path(args.output_dir) / "summary.json", summary)
     print(path)
     print(json.dumps(summary, indent=2, sort_keys=True))
