@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Large or regenerated artifacts.
+data/benchmarks/
+score_exports/*
+results/*
+trained_model/
+checkpoints/
+*.ckpt
+*.pt
+*.pth
+*.pkl
+*.pickle
+*.npz
+
+!data/README.md
+!score_exports/README.md
+!results/.gitkeep

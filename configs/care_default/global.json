@@ -1,0 +1,13 @@
+{
+  "method": "CARE",
+  "target_coverage": 0.9,
+  "care": {
+    "k": 200,
+    "rho": 0.9,
+    "kappa": 50.0
+  },
+  "calibration": {
+    "ref_fraction": 0.6,
+    "split_seed": 0
+  }
+}
