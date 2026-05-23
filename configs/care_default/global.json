@@ -9,6 +9,7 @@
   },
   "calibration": {
     "ref_fraction": 0.6,
+    "split_seed_policy": "score_seed_for_paper_10seed",
     "split_seed": 0
   }
 }

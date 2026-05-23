@@ -60,7 +60,8 @@ python scripts/run_10seed.py
 ```
 
 By default this runs all three datasets, all three score models, and seeds
-`0,1,2,3,4,5,6,7,8,9`. The default KNN backend is `cuda`; use
+`0,1,2,3,4,5,6,7,8,9`. For seed `i`, the score export seed and the
+calibration split seed are both fixed to `i`. The default KNN backend is `cuda`; use
 `--knn-backend cpu` or `--knn-backend mps` on machines without CUDA FAISS.
 
 Useful narrower runs:
@@ -91,6 +92,7 @@ K = 200
 rho = 0.90
 kappa = 50
 reference/conformal split = 60/40
+paper 10-seed split policy = score seed i uses calibration split seed i
 retrieval = exact L2 with cuda/cpu/mps backend
 ```
 

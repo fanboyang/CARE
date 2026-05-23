@@ -19,6 +19,7 @@ SCORE_MODELS = ("ukge", "passleaf", "beurre")
 DATASETS = ("cn15k", "ppi5k", "nl27k")
 SUBSETS = ("positive", "negative", "combined")
 KNN_BACKENDS = ("cuda", "cpu", "mps")
+PAPER_SEEDS = tuple(range(10))
 SPLIT_FILES = {
     "cal_pos": "calibration_val.csv",
     "cal_neg": "calibration_neg.csv",
@@ -26,6 +27,10 @@ SPLIT_FILES = {
     "test_neg": "test_neg.csv",
     "test_mix": "test_with_neg.csv",
 }
+
+
+def split_seed_for_score_seed(seed: int) -> int:
+    return int(seed)
 
 
 @dataclass(frozen=True)

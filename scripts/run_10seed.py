@@ -12,7 +12,17 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from care.interval import DATASETS, KNN_BACKENDS, SCORE_MODELS, SUBSETS, evaluate_cell, load_config, write_json  # noqa: E402
+from care.interval import (  # noqa: E402
+    DATASETS,
+    KNN_BACKENDS,
+    PAPER_SEEDS,
+    SCORE_MODELS,
+    SUBSETS,
+    evaluate_cell,
+    load_config,
+    split_seed_for_score_seed,
+    write_json,
+)
 
 
 def _csv_list(text: str, choices: tuple[str, ...]) -> tuple[str, ...]:
@@ -31,7 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run CARE on the 10-seed evaluation matrix.")
     parser.add_argument("--datasets", default="cn15k,ppi5k,nl27k")
     parser.add_argument("--score-models", default="ukge,passleaf,beurre")
-    parser.add_argument("--seeds", default="0,1,2,3,4,5,6,7,8,9")
+    parser.add_argument("--seeds", default=",".join(str(seed) for seed in PAPER_SEEDS))
     parser.add_argument("--target-coverage", type=float, default=0.90)
     parser.add_argument("--score-root", default="score_exports")
     parser.add_argument("--config-dir", default="configs/care_default")
@@ -76,13 +86,18 @@ def main() -> None:
     for score_model in score_models:
         for dataset in datasets:
             for seed in seeds:
-                run_cfg = replace(cfg, split_seed=int(seed), knn_backend=knn_backend)
+                run_cfg = replace(cfg, split_seed=split_seed_for_score_seed(seed), knn_backend=knn_backend)
                 result = evaluate_cell(args.score_root, score_model, dataset, seed, run_cfg)
                 out = Path(args.output_dir) / "per_seed" / score_model / dataset / f"seed{seed}.json"
                 write_json(out, result)
                 records.append(result)
                 print(f"finished score_model={score_model} dataset={dataset} seed={seed}")
-    summary_config = {**cfg.__dict__, "knn_backend": knn_backend, "split_seed": "seed_specific"}
+    summary_config = {
+        **cfg.__dict__,
+        "knn_backend": knn_backend,
+        "split_seed_policy": "score_seed",
+        "split_seed": "score_seed",
+    }
     summary = {"method": "CARE", "config": summary_config, "summary": _summarize(records)}
     path = write_json(Path(args.output_dir) / "summary.json", summary)
     print(path)
