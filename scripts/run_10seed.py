@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from care.interval import (  # noqa: E402
+from CARE.interval import (  # noqa: E402
     DATASETS,
     KNN_BACKENDS,
     PAPER_SEEDS,
@@ -25,27 +25,15 @@ from care.interval import (  # noqa: E402
 )
 
 
-def _csv_list(text: str, choices: tuple[str, ...]) -> tuple[str, ...]:
-    items = tuple(item.strip() for item in text.split(",") if item.strip())
-    bad = [item for item in items if item not in choices]
-    if bad:
-        raise ValueError(f"unsupported values: {bad}")
-    return items
-
-
-def _seed_list(text: str) -> tuple[int, ...]:
-    return tuple(int(item.strip()) for item in text.split(",") if item.strip())
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run CARE on the 10-seed evaluation matrix.")
-    parser.add_argument("--datasets", default="cn15k,ppi5k,nl27k")
-    parser.add_argument("--score-models", default="ukge,passleaf,beurre")
-    parser.add_argument("--seeds", default=",".join(str(seed) for seed in PAPER_SEEDS))
+    parser.add_argument("--datasets", nargs="+", choices=DATASETS, default=list(DATASETS))
+    parser.add_argument("--score-models", nargs="+", choices=SCORE_MODELS, default=list(SCORE_MODELS))
+    parser.add_argument("--seeds", nargs="+", type=int, default=list(PAPER_SEEDS))
     parser.add_argument("--target-coverage", type=float, default=0.90)
     parser.add_argument("--score-root", default="score_exports")
-    parser.add_argument("--config-dir", default="configs/care_default")
-    parser.add_argument("--output-dir", default="results/care_10seed")
+    parser.add_argument("--config-dir", default="configs/CARE_default")
+    parser.add_argument("--output-dir", default="results/CARE_10seed")
     parser.add_argument("--knn-backend", choices=KNN_BACKENDS, default=None)
     return parser.parse_args()
 
@@ -54,51 +42,44 @@ def _summarize(records: list[dict[str, object]]) -> list[dict[str, object]]:
     rows = []
     for score_model in SCORE_MODELS:
         for dataset in DATASETS:
-            cell = [item for item in records if item["score_model"] == score_model and item["dataset"] == dataset]
+            cell = [r for r in records if r["score_model"] == score_model and r["dataset"] == dataset]
             if not cell:
                 continue
             for subset in SUBSETS:
-                cov = np.asarray([item["subsets"][subset]["metrics"]["coverage"] for item in cell], dtype=float)
-                sharp = np.asarray([item["subsets"][subset]["metrics"]["sharpness"] for item in cell], dtype=float)
-                rows.append(
-                    {
-                        "score_model": score_model,
-                        "dataset": dataset,
-                        "subset": subset,
-                        "seeds": int(len(cell)),
-                        "coverage_mean": float(np.mean(cov)),
-                        "coverage_var": float(np.var(cov, ddof=1)) if len(cov) > 1 else 0.0,
-                        "sharpness_mean": float(np.mean(sharp)),
-                        "sharpness_var": float(np.var(sharp, ddof=1)) if len(sharp) > 1 else 0.0,
-                    }
-                )
+                cov = np.asarray([r["subsets"][subset]["metrics"]["coverage"] for r in cell], dtype=float)
+                sharp = np.asarray([r["subsets"][subset]["metrics"]["sharpness"] for r in cell], dtype=float)
+                rows.append({
+                    "score_model": score_model,
+                    "dataset": dataset,
+                    "subset": subset,
+                    "seeds": int(len(cell)),
+                    "coverage_mean": float(np.mean(cov)),
+                    "coverage_var": float(np.var(cov, ddof=1)) if len(cov) > 1 else 0.0,
+                    "sharpness_mean": float(np.mean(sharp)),
+                    "sharpness_var": float(np.var(sharp, ddof=1)) if len(sharp) > 1 else 0.0,
+                })
     return rows
 
 
 def main() -> None:
     args = parse_args()
-    datasets = _csv_list(args.datasets, DATASETS)
-    score_models = _csv_list(args.score_models, SCORE_MODELS)
-    seeds = _seed_list(args.seeds)
     cfg = load_config(args.config_dir, args.target_coverage)
     knn_backend = args.knn_backend or cfg.knn_backend
     records = []
-    for score_model in score_models:
-        for dataset in datasets:
-            for seed in seeds:
+    for score_model in args.score_models:
+        for dataset in args.datasets:
+            for seed in args.seeds:
                 run_cfg = replace(cfg, split_seed=split_seed_for_score_seed(seed), knn_backend=knn_backend)
                 result = evaluate_cell(args.score_root, score_model, dataset, seed, run_cfg)
                 out = Path(args.output_dir) / "per_seed" / score_model / dataset / f"seed{seed}.json"
                 write_json(out, result)
                 records.append(result)
                 print(f"finished score_model={score_model} dataset={dataset} seed={seed}")
-    summary_config = {
-        **cfg.__dict__,
-        "knn_backend": knn_backend,
-        "split_seed_policy": "score_seed",
-        "split_seed": "score_seed",
+    summary = {
+        "method": "CARE",
+        "config": {**cfg.__dict__, "knn_backend": knn_backend, "split_seed_policy": "score_seed"},
+        "summary": _summarize(records),
     }
-    summary = {"method": "CARE", "config": summary_config, "summary": _summarize(records)}
     path = write_json(Path(args.output_dir) / "summary.json", summary)
     print(path)
     print(json.dumps(summary, indent=2, sort_keys=True))

@@ -1,4 +1,4 @@
-"""CARE interval evaluation with explicit CUDA, CPU, and MPS KNN backends."""
+"""CARE interval evaluation with explicit CUDA and CPU KNN backends."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCORE_MODELS = ("ukge", "passleaf", "beurre")
 DATASETS = ("cn15k", "ppi5k", "nl27k")
 SUBSETS = ("positive", "negative", "combined")
-KNN_BACKENDS = ("cuda", "cpu", "mps")
+KNN_BACKENDS = ("cuda", "cpu")
 PAPER_SEEDS = tuple(range(10))
 SPLIT_FILES = {
     "cal_pos": "calibration_val.csv",
@@ -44,24 +44,31 @@ class CareConfig:
     knn_backend: str = "cuda"
 
 
+def _check_backend(name: str) -> str:
+    backend = str(name).lower()
+    if backend not in KNN_BACKENDS:
+        raise ValueError(f"unsupported KNN backend: {name}; choose one of {KNN_BACKENDS}")
+    return backend
+
+
 def load_config(path: str | Path | None = None, target_coverage: float | None = None) -> CareConfig:
     if path is None:
-        cfg = {}
+        cfg: dict = {}
     else:
         cfg_path = Path(path)
         if not cfg_path.is_absolute():
             cfg_path = ROOT / cfg_path
         cfg = json.loads((cfg_path / "global.json").read_text(encoding="utf-8"))
-    params = cfg.get("care", cfg.get("global_params", {}))
-    split = cfg.get("calibration", cfg.get("calibration_protocol", {}))
+    params = cfg.get("care", {})
+    split = cfg.get("calibration", {})
     return CareConfig(
         target_coverage=float(target_coverage if target_coverage is not None else cfg.get("target_coverage", 0.90)),
         k=int(params.get("k", 200)),
-        rho=float(params.get("rho", params.get("local_quantile", 0.90))),
-        kappa=float(params.get("kappa", params.get("shrink", 50.0))),
-        ref_fraction=float(split.get("ref_fraction", split.get("reference_pool_fraction", 0.60))),
+        rho=float(params.get("rho", 0.90)),
+        kappa=float(params.get("kappa", 50.0)),
+        ref_fraction=float(split.get("ref_fraction", 0.60)),
         split_seed=int(split.get("split_seed", 0)),
-        knn_backend=_normalize_knn_backend(cfg.get("knn_backend", params.get("knn_backend", "cuda"))),
+        knn_backend=_check_backend(cfg.get("knn_backend", "cuda")),
     )
 
 
@@ -88,8 +95,7 @@ def _entropy(score: np.ndarray, dataset: str) -> np.ndarray:
 
 def _read_frame(path: Path) -> pd.DataFrame:
     frame = pd.read_csv(path, dtype={"h": str, "r": str, "t": str, "label": str, "score": float})
-    needed = {"h", "r", "t", "label", "score"}
-    missing = needed.difference(frame.columns)
+    missing = {"h", "r", "t", "label", "score"}.difference(frame.columns)
     if missing:
         raise ValueError(f"{path} misses columns: {sorted(missing)}")
     frame = frame.copy()
@@ -111,6 +117,7 @@ def load_score_splits(score_root: str | Path, score_model: str, dataset: str, se
 
 @lru_cache(maxsize=None)
 def _graph_stats(dataset: str) -> dict[str, object]:
+    # Training graph context.
     path = ROOT / "data" / "benchmarks" / dataset / "train.tsv"
     if not path.exists():
         raise FileNotFoundError(f"missing training graph: {path}")
@@ -156,6 +163,7 @@ def _common_neighbors(heads: np.ndarray, tails: np.ndarray, adj: list[set[int]])
 
 
 def feature_matrix(frame: pd.DataFrame, dataset: str) -> np.ndarray:
+    # Anchor-search features.
     stats = _graph_stats(dataset)
     h = frame["h"].to_numpy(dtype=int)
     r = frame["r"].to_numpy(dtype=int)
@@ -163,7 +171,6 @@ def feature_matrix(frame: pd.DataFrame, dataset: str) -> np.ndarray:
     score = frame["score"].to_numpy(dtype=float).astype(np.float32)
     degree = stats["degree"]
     rel_freq = stats["rel_freq"]
-    adj = stats["adj"]
     edges = stats["edges"]
     edge_flag = np.asarray(
         [1.0 if ((int(a), int(b)) if int(a) <= int(b) else (int(b), int(a))) in edges else 0.0 for a, b in zip(h, t)],
@@ -177,30 +184,13 @@ def feature_matrix(frame: pd.DataFrame, dataset: str) -> np.ndarray:
             np.log1p(_counts(degree, t)),
             np.log1p(_counts(rel_freq, r)),
             edge_flag,
-            np.log1p(_common_neighbors(h, t, adj)),
+            np.log1p(_common_neighbors(h, t, stats["adj"])),
         ]
     ).astype(np.float32)
     rel_onehot = np.zeros((len(frame), len(rel_freq)), dtype=np.float32)
     valid = (0 <= r) & (r < len(rel_freq))
     rel_onehot[np.arange(len(frame))[valid], r[valid]] = 1.0
     return np.column_stack([scalars, rel_onehot]).astype(np.float32)
-
-
-def _normalize_knn_backend(name: str) -> str:
-    aliases = {
-        "faiss_gpu": "cuda",
-        "faiss-gpu": "cuda",
-        "gpu": "cuda",
-        "faiss_cpu": "cpu",
-        "faiss-cpu": "cpu",
-        "numpy": "cpu",
-        "torch_mps": "mps",
-        "apple_mps": "mps",
-    }
-    backend = aliases.get(str(name).lower(), str(name).lower())
-    if backend not in KNN_BACKENDS:
-        raise ValueError(f"unsupported KNN backend: {name}; choose one of {KNN_BACKENDS}")
-    return backend
 
 
 def _check_knn_inputs(reference: np.ndarray, target: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray, int]:
@@ -230,47 +220,24 @@ def _cuda_knn(reference: np.ndarray, target: np.ndarray, k: int) -> np.ndarray:
 def _cpu_knn(reference: np.ndarray, target: np.ndarray, k: int) -> np.ndarray:
     reference, target, k = _check_knn_inputs(reference, target, k)
     batch_size = int(os.environ.get("CARE_KNN_BATCH_SIZE", "1024"))
-    ref_norm = np.sum(reference * reference, axis=1, keepdims=False)[None, :]
+    ref_norm = np.sum(reference * reference, axis=1)[None, :]
     batches = []
     for start in range(0, len(target), batch_size):
         query = target[start : start + batch_size]
         dist = np.sum(query * query, axis=1, keepdims=True) + ref_norm - 2.0 * (query @ reference.T)
         candidate = np.argpartition(dist, kth=k - 1, axis=1)[:, :k]
-        candidate_dist = np.take_along_axis(dist, candidate, axis=1)
-        order = np.argsort(candidate_dist, axis=1, kind="stable")
+        order = np.argsort(np.take_along_axis(dist, candidate, axis=1), axis=1, kind="stable")
         batches.append(np.take_along_axis(candidate, order, axis=1).astype(np.int64, copy=False))
     return np.vstack(batches)
 
 
-def _mps_knn(reference: np.ndarray, target: np.ndarray, k: int) -> np.ndarray:
-    reference, target, k = _check_knn_inputs(reference, target, k)
-    import torch
-
-    if not torch.backends.mps.is_available():
-        raise RuntimeError("KNN backend 'mps' was requested, but PyTorch MPS is not available.")
-    batch_size = int(os.environ.get("CARE_KNN_BATCH_SIZE", "1024"))
-    device = torch.device("mps")
-    ref = torch.as_tensor(reference, dtype=torch.float32, device=device)
-    ref_norm = torch.sum(ref * ref, dim=1).unsqueeze(0)
-    batches = []
-    for start in range(0, len(target), batch_size):
-        query = torch.as_tensor(target[start : start + batch_size], dtype=torch.float32, device=device)
-        dist = torch.sum(query * query, dim=1, keepdim=True) + ref_norm - 2.0 * (query @ ref.T)
-        idx = torch.topk(dist, k=k, largest=False, sorted=True).indices
-        batches.append(idx.cpu().numpy().astype(np.int64, copy=False))
-    return np.vstack(batches)
-
-
 def _knn(reference: np.ndarray, target: np.ndarray, k: int, backend: str) -> np.ndarray:
-    backend = _normalize_knn_backend(backend)
-    if backend == "cuda":
-        return _cuda_knn(reference, target, k)
-    if backend == "cpu":
-        return _cpu_knn(reference, target, k)
-    return _mps_knn(reference, target, k)
+    backend = _check_backend(backend)
+    return _cuda_knn(reference, target, k) if backend == "cuda" else _cpu_knn(reference, target, k)
 
 
 def _split_calibration(cal: pd.DataFrame, cfg: CareConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
+    # Reference/holdout split.
     rng = np.random.default_rng(cfg.split_seed)
     error = cal["score"].to_numpy(dtype=float) - cal["label_value"].to_numpy(dtype=float)
     sign = np.full(len(cal), "eq", dtype=object)
@@ -292,6 +259,7 @@ def _residual(frame: pd.DataFrame, side: str) -> np.ndarray:
 
 
 def _scales(ref: pd.DataFrame, target: pd.DataFrame, dataset: str, cfg: CareConfig, side: str) -> np.ndarray:
+    # Local residual scale.
     scaler = StandardScaler()
     ref_x = scaler.fit_transform(feature_matrix(ref, dataset)).astype(np.float32)
     target_x = scaler.transform(feature_matrix(target, dataset)).astype(np.float32)
@@ -315,6 +283,7 @@ def _metrics(frame: pd.DataFrame, lower: np.ndarray, upper: np.ndarray) -> dict[
 
 
 def evaluate_subset(cal: pd.DataFrame, test: pd.DataFrame, dataset: str, cfg: CareConfig) -> dict[str, object]:
+    # CARE interval construction.
     ref, holdout = _split_calibration(cal, cfg)
     hold_lower = _scales(ref, holdout, dataset, cfg, "lower")
     hold_upper = _scales(ref, holdout, dataset, cfg, "upper")
@@ -324,30 +293,22 @@ def evaluate_subset(cal: pd.DataFrame, test: pd.DataFrame, dataset: str, cfg: Ca
     test_lower_scale = _scales(ref, test, dataset, cfg, "lower")
     test_upper_scale = _scales(ref, test, dataset, cfg, "upper")
     center = test["score"].to_numpy(dtype=float)
-    lower = center - multiplier * test_lower_scale
-    upper = center + multiplier * test_upper_scale
     return {
-        "metrics": _metrics(test, lower, upper),
+        "metrics": _metrics(test, center - multiplier * test_lower_scale, center + multiplier * test_upper_scale),
         "multiplier": float(multiplier),
-        "split": {
-            "reference": int(len(ref)),
-            "conformal": int(len(holdout)),
-        },
+        "split": {"reference": int(len(ref)), "conformal": int(len(holdout))},
     }
 
 
 def evaluate_cell(score_root: str | Path, score_model: str, dataset: str, seed: int, cfg: CareConfig) -> dict[str, object]:
+    # One reported cell.
     splits = load_score_splits(score_root, score_model, dataset, seed)
     cal = {
         "positive": splits["cal_pos"],
         "negative": splits["cal_neg"],
         "combined": pd.concat([splits["cal_pos"], splits["cal_neg"]], ignore_index=True),
     }
-    test = {
-        "positive": splits["test_pos"],
-        "negative": splits["test_neg"],
-        "combined": splits["test_mix"],
-    }
+    test = {"positive": splits["test_pos"], "negative": splits["test_neg"], "combined": splits["test_mix"]}
     return {
         "method": "CARE",
         "score_model": score_model,
