@@ -54,9 +54,7 @@ def _summarize(records: list[dict[str, object]]) -> list[dict[str, object]]:
                     "subset": subset,
                     "seeds": int(len(cell)),
                     "coverage_mean": float(np.mean(cov)),
-                    "coverage_var": float(np.var(cov, ddof=1)) if len(cov) > 1 else 0.0,
                     "sharpness_mean": float(np.mean(sharp)),
-                    "sharpness_var": float(np.var(sharp, ddof=1)) if len(sharp) > 1 else 0.0,
                 })
     return rows
 
