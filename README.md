@@ -22,7 +22,6 @@ care_release/
 │   └── README.md
 ├── score_exports/
 │   └── README.md
-└── results/
 ```
 
 ## Installation
